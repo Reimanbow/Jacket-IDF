@@ -1,9 +1,11 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "neopixel.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
+
+#include "neopixel.h"
+#include "sd_storage.h"
 
 #define NEOPIXEL_PIN GPIO_NUM_0
 #define NEOPIXEL_COUNT 12
@@ -12,6 +14,8 @@ static const char *TAG = "main";
 
 void app_main(void)
 {
+	sd_init();
+
 	// Initialize NeoPixel strip
 	neopixel_handle_t strip = neopixel_init(NEOPIXEL_PIN, NEOPIXEL_COUNT);
 	if (strip == NULL) {
