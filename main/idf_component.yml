@@ -16,3 +16,4 @@ dependencies:
   #   public: true
   espressif/led_strip: ^2.5.5
   espressif/log_router: =*
+  esp-idf-lib/bme680: '*'
