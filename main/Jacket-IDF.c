@@ -11,9 +11,14 @@
 
 #include "neopixel.h"
 #include "sd_storage.h"
+#include "esp_adc/adc_oneshot.h"
 
 #define NEOPIXEL_PIN GPIO_NUM_0
 #define NEOPIXEL_COUNT 12
+
+// CO Sensor settings
+#define CO_SENSOR_ADC_CHANNEL ADC_CHANNEL_0  // GPIO21 = ADC1_CH0
+#define CO_SENSOR_WARMUP_TIME_MS (5 * 60 * 1000)  // 5 minutes
 
 // BME680 I2C settings
 #define BME680_I2C_PORT I2C_NUM_0
@@ -117,6 +122,34 @@ void bme680_task(void *pvParameters)
 	}
 }
 
+// CO Sensor task
+void co_sensor_task(void *pvParameters)
+{
+	adc_oneshot_unit_handle_t adc1_handle;
+	adc_oneshot_unit_init_cfg_t init_config = {
+		.unit_id = ADC_UNIT_1,
+	};
+	ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc1_handle));
+
+	adc_oneshot_chan_cfg_t config = {
+		.bitwidth = ADC_BITWIDTH_DEFAULT,
+		.atten = ADC_ATTEN_DB_12,  // 0-3.3V range
+	};
+	ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, CO_SENSOR_ADC_CHANNEL, &config));
+
+	ESP_LOGI(TAG, "CO Sensor warming up for 5 minutes...");
+	vTaskDelay(pdMS_TO_TICKS(CO_SENSOR_WARMUP_TIME_MS));
+	ESP_LOGI(TAG, "CO Sensor ready");
+
+	int adc_reading;
+	while (1) {
+		ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, CO_SENSOR_ADC_CHANNEL, &adc_reading));
+		ESP_LOGI(TAG, "CO Sensor: ADC raw value = %d", adc_reading);
+
+		vTaskDelay(pdMS_TO_TICKS(1000));
+	}
+}
+
 void app_main(void)
 {
 	// Initialize I2C library
@@ -135,6 +168,9 @@ void app_main(void)
 
 	// Create BME680 task
 	xTaskCreate(bme680_task, "bme680_task", configMINIMAL_STACK_SIZE * 8, NULL, 5, NULL);
+
+	// Create CO Sensor task
+	xTaskCreate(co_sensor_task, "co_sensor_task", configMINIMAL_STACK_SIZE * 4, NULL, 5, NULL);
 
 	uint8_t brightness = 0;
 	int8_t direction = 1;
