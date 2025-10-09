@@ -17,7 +17,7 @@
 #define NEOPIXEL_COUNT 12
 
 // CO Sensor settings
-#define CO_SENSOR_ADC_CHANNEL ADC_CHANNEL_0  // GPIO21 = ADC1_CH0
+#define CO_SENSOR_ADC_CHANNEL ADC_CHANNEL_1  // GPIO1 = ADC1_CH1
 #define CO_SENSOR_WARMUP_TIME_MS (5 * 60 * 1000)  // 5 minutes
 
 // BME680 I2C settings
