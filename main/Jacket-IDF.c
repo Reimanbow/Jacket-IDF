@@ -20,6 +20,10 @@
 #define CO_SENSOR_ADC_CHANNEL ADC_CHANNEL_1  // GPIO1 = ADC1_CH1
 #define CO_SENSOR_WARMUP_TIME_MS (5 * 60 * 1000)  // 5 minutes
 
+// H2S Sensor settings
+#define H2S_SENSOR_ADC_CHANNEL ADC_CHANNEL_2  // GPIO2 = ADC1_CH2
+#define H2S_SENSOR_WARMUP_TIME_MS (5 * 60 * 1000)  // 5 minutes
+
 // BME680 I2C settings
 #define BME680_I2C_PORT I2C_NUM_0
 #define BME680_I2C_ADDR BME680_I2C_ADDR_1  // 0x76 (or use BME680_I2C_ADDR_1 for 0x77)
@@ -125,11 +129,7 @@ void bme680_task(void *pvParameters)
 // CO Sensor task
 void co_sensor_task(void *pvParameters)
 {
-	adc_oneshot_unit_handle_t adc1_handle;
-	adc_oneshot_unit_init_cfg_t init_config = {
-		.unit_id = ADC_UNIT_1,
-	};
-	ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc1_handle));
+	adc_oneshot_unit_handle_t adc1_handle = (adc_oneshot_unit_handle_t)pvParameters;
 
 	adc_oneshot_chan_cfg_t config = {
 		.bitwidth = ADC_BITWIDTH_DEFAULT,
@@ -145,6 +145,30 @@ void co_sensor_task(void *pvParameters)
 	while (1) {
 		ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, CO_SENSOR_ADC_CHANNEL, &adc_reading));
 		ESP_LOGI(TAG, "CO Sensor: ADC raw value = %d", adc_reading);
+
+		vTaskDelay(pdMS_TO_TICKS(1000));
+	}
+}
+
+// H2S Sensor task
+void h2s_sensor_task(void *pvParameters)
+{
+	adc_oneshot_unit_handle_t adc1_handle = (adc_oneshot_unit_handle_t)pvParameters;
+
+	adc_oneshot_chan_cfg_t config = {
+		.bitwidth = ADC_BITWIDTH_DEFAULT,
+		.atten = ADC_ATTEN_DB_12,  // 0-3.3V range
+	};
+	ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, H2S_SENSOR_ADC_CHANNEL, &config));
+
+	ESP_LOGI(TAG, "H2S Sensor warming up for 5 minutes...");
+	vTaskDelay(pdMS_TO_TICKS(H2S_SENSOR_WARMUP_TIME_MS));
+	ESP_LOGI(TAG, "H2S Sensor ready");
+
+	int adc_reading;
+	while (1) {
+		ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, H2S_SENSOR_ADC_CHANNEL, &adc_reading));
+		ESP_LOGI(TAG, "H2S Sensor: ADC raw value = %d", adc_reading);
 
 		vTaskDelay(pdMS_TO_TICKS(1000));
 	}
@@ -166,11 +190,22 @@ void app_main(void)
 
 	ESP_LOGI(TAG, "NeoPixel initialized on GPIO %d with %d pixels", NEOPIXEL_PIN, NEOPIXEL_COUNT);
 
+	// Initialize ADC1 unit (shared by CO and H2S sensors)
+	adc_oneshot_unit_handle_t adc1_handle;
+	adc_oneshot_unit_init_cfg_t init_config = {
+		.unit_id = ADC_UNIT_1,
+	};
+	ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc1_handle));
+	ESP_LOGI(TAG, "ADC1 initialized for CO and H2S sensors");
+
 	// Create BME680 task
 	xTaskCreate(bme680_task, "bme680_task", configMINIMAL_STACK_SIZE * 8, NULL, 5, NULL);
 
 	// Create CO Sensor task
-	xTaskCreate(co_sensor_task, "co_sensor_task", configMINIMAL_STACK_SIZE * 4, NULL, 5, NULL);
+	xTaskCreate(co_sensor_task, "co_sensor_task", configMINIMAL_STACK_SIZE * 4, (void *)adc1_handle, 5, NULL);
+
+	// Create H2S Sensor task
+	xTaskCreate(h2s_sensor_task, "h2s_sensor_task", configMINIMAL_STACK_SIZE * 4, (void *)adc1_handle, 5, NULL);
 
 	uint8_t brightness = 0;
 	int8_t direction = 1;
