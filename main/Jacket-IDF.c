@@ -32,144 +32,128 @@
 
 static const char *TAG = "main";
 
-// BME680 sensor task
-void bme680_task(void *pvParameters)
+// Unified sensor manager task
+void sensor_manager_task(void *pvParameters)
 {
-	bme680_t sensor;
-	memset(&sensor, 0, sizeof(bme680_t));
+	// ========== ADC初期化 ==========
+	adc_oneshot_unit_handle_t adc1_handle;
+	adc_oneshot_unit_init_cfg_t adc_init_config = {
+		.unit_id = ADC_UNIT_1,
+	};
+	ESP_ERROR_CHECK(adc_oneshot_new_unit(&adc_init_config, &adc1_handle));
+
+	// COセンサー用ADCチャンネル設定
+	adc_oneshot_chan_cfg_t adc_config = {
+		.bitwidth = ADC_BITWIDTH_DEFAULT,
+		.atten = ADC_ATTEN_DB_12,  // 0-3.3V range
+	};
+	ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, CO_SENSOR_ADC_CHANNEL, &adc_config));
+	ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, H2S_SENSOR_ADC_CHANNEL, &adc_config));
+	ESP_LOGI(TAG, "ADC1 initialized for CO (GPIO1) and H2S (GPIO2) sensors");
+
+	// ========== BME680初期化 ==========
+	bme680_t bme_sensor;
+	memset(&bme_sensor, 0, sizeof(bme680_t));
 
 	ESP_LOGI(TAG, "Initializing BME680 sensor on I2C port %d, addr 0x%02X, SDA=%d, SCL=%d",
 		BME680_I2C_PORT, BME680_I2C_ADDR, BME680_I2C_SDA, BME680_I2C_SCL);
 
-	// Initialize sensor descriptor with explicit I2C configuration
-	// Use 100kHz for better stability (default is 400kHz)
-	esp_err_t res = bme680_init_desc(&sensor, BME680_I2C_ADDR, BME680_I2C_PORT, BME680_I2C_SDA, BME680_I2C_SCL);
+	esp_err_t res = bme680_init_desc(&bme_sensor, BME680_I2C_ADDR, BME680_I2C_PORT, BME680_I2C_SDA, BME680_I2C_SCL);
 	if (res == ESP_OK) {
-		sensor.i2c_dev.cfg.master.clk_speed = 100000;  // 100kHz for stability
-		sensor.i2c_dev.cfg.sda_pullup_en = true;       // Enable internal pullup
-		sensor.i2c_dev.cfg.scl_pullup_en = true;       // Enable internal pullup
+		bme_sensor.i2c_dev.cfg.master.clk_speed = 100000;  // 100kHz for stability
+		bme_sensor.i2c_dev.cfg.sda_pullup_en = true;
+		bme_sensor.i2c_dev.cfg.scl_pullup_en = true;
 		ESP_LOGI(TAG, "I2C configured: 100kHz, pullups enabled");
 	}
-	if (res != ESP_OK) {
-		ESP_LOGE(TAG, "Failed to init BME680 descriptor: %s (0x%x)", esp_err_to_name(res), res);
-		ESP_LOGE(TAG, "Check I2C connections and address. Sensor task will exit.");
-		vTaskDelete(NULL);
-		return;
-	}
 
-	// Initialize the sensor
-	res = bme680_init_sensor(&sensor);
-	if (res != ESP_OK) {
-		ESP_LOGE(TAG, "Failed to init BME680 sensor: %s (0x%x)", esp_err_to_name(res), res);
-		ESP_LOGE(TAG, "Possible causes: sensor not connected, wrong I2C address, missing pullups");
-		bme680_free_desc(&sensor);
-		vTaskDelete(NULL);
-		return;
-	}
-
-	// Configure oversampling rates: 1x for faster measurements
-	bme680_set_oversampling_rates(&sensor, BME680_OSR_1X, BME680_OSR_1X, BME680_OSR_1X);
-
-	// Set IIR filter size to 1 for faster response
-	bme680_set_filter_size(&sensor, BME680_IIR_SIZE_1);
-
-	// Configure heater profile 0: 300°C for 100ms (shorter for faster cycle)
-	bme680_set_heater_profile(&sensor, 0, 300, 100);
-	bme680_use_heater_profile(&sensor, 0);
-
-	// Set ambient temperature to 20°C
-	bme680_set_ambient_temperature(&sensor, 20);
-
-	// Get measurement duration (constant as long as configuration doesn't change)
-	uint32_t duration;
-	bme680_get_measurement_duration(&sensor, &duration);
-
-	ESP_LOGI(TAG, "BME680 initialized successfully (measurement duration: %"PRIu32"ms)", duration);
-	ESP_LOGI(TAG, "Note: Gas measurement may take longer due to heater warm-up time");
-
-	bme680_values_float_t values;
-
-	while (1) {
-		// Trigger one TPHG measurement cycle
-		if (bme680_force_measurement(&sensor) == ESP_OK) {
-			// Wait for the measurement duration plus minimal heater margin
-			vTaskDelay(pdMS_TO_TICKS(duration + 50));
-
-			// Poll until measurement is ready (with timeout)
-			bool busy = true;
-			bool measurement_ready = false;
-			for (int retry = 0; retry < 30; retry++) {
-				if (bme680_is_measuring(&sensor, &busy) == ESP_OK && !busy) {
-					measurement_ready = true;
-					break;
-				}
-				vTaskDelay(pdMS_TO_TICKS(10));
-			}
-
-			if (measurement_ready) {
-				// Get and display results
-				if (bme680_get_results_float(&sensor, &values) == ESP_OK) {
-					ESP_LOGI(TAG, "BME680: Temp=%.2f°C, Hum=%.2f%%, Press=%.2fhPa, Gas=%.2fΩ",
-						values.temperature, values.humidity, values.pressure, values.gas_resistance);
-				} else {
-					ESP_LOGW(TAG, "Failed to read BME680 values");
-				}
-			} else {
-				ESP_LOGW(TAG, "BME680 measurement timeout (still busy after polling)");
-			}
+	bool bme680_available = false;
+	if (res == ESP_OK) {
+		res = bme680_init_sensor(&bme_sensor);
+		if (res == ESP_OK) {
+			bme680_set_oversampling_rates(&bme_sensor, BME680_OSR_1X, BME680_OSR_1X, BME680_OSR_1X);
+			bme680_set_filter_size(&bme_sensor, BME680_IIR_SIZE_1);
+			bme680_set_heater_profile(&bme_sensor, 0, 300, 100);
+			bme680_use_heater_profile(&bme_sensor, 0);
+			bme680_set_ambient_temperature(&bme_sensor, 20);
+			bme680_available = true;
+			ESP_LOGI(TAG, "BME680 initialized successfully");
 		} else {
-			ESP_LOGW(TAG, "Failed to start BME680 measurement");
+			ESP_LOGW(TAG, "BME680 init failed, will continue without it");
+		}
+	} else {
+		ESP_LOGW(TAG, "BME680 descriptor init failed, will continue without it");
+	}
+
+	uint32_t bme_duration = 0;
+	if (bme680_available) {
+		bme680_get_measurement_duration(&bme_sensor, &bme_duration);
+	}
+
+	// ========== ウォームアップ管理 ==========
+	bool co_ready = false;
+	bool h2s_ready = false;
+	uint32_t start_time = xTaskGetTickCount();
+
+	ESP_LOGI(TAG, "CO and H2S sensors warming up for 5 minutes...");
+
+	// ========== メインループ ==========
+	while (1) {
+		uint32_t elapsed_ms = (xTaskGetTickCount() - start_time) * portTICK_PERIOD_MS;
+
+		// ウォームアップ状態チェック
+		if (!co_ready && elapsed_ms >= CO_SENSOR_WARMUP_TIME_MS) {
+			co_ready = true;
+			ESP_LOGI(TAG, "CO Sensor ready");
+		}
+		if (!h2s_ready && elapsed_ms >= H2S_SENSOR_WARMUP_TIME_MS) {
+			h2s_ready = true;
+			ESP_LOGI(TAG, "H2S Sensor ready");
 		}
 
-		// Wait for 1 second between measurements (faster cycle)
-		vTaskDelay(pdMS_TO_TICKS(1000));
-	}
-}
+		// ========== BME680読み取り ==========
+		bme680_values_float_t bme_values = {0};
+		bool bme_valid = false;
 
-// CO Sensor task
-void co_sensor_task(void *pvParameters)
-{
-	adc_oneshot_unit_handle_t adc1_handle = (adc_oneshot_unit_handle_t)pvParameters;
+		if (bme680_available) {
+			if (bme680_force_measurement(&bme_sensor) == ESP_OK) {
+				vTaskDelay(pdMS_TO_TICKS(bme_duration + 50));
 
-	adc_oneshot_chan_cfg_t config = {
-		.bitwidth = ADC_BITWIDTH_DEFAULT,
-		.atten = ADC_ATTEN_DB_12,  // 0-3.3V range
-	};
-	ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, CO_SENSOR_ADC_CHANNEL, &config));
+				bool busy = true;
+				for (int retry = 0; retry < 30; retry++) {
+					if (bme680_is_measuring(&bme_sensor, &busy) == ESP_OK && !busy) {
+						if (bme680_get_results_float(&bme_sensor, &bme_values) == ESP_OK) {
+							bme_valid = true;
+						}
+						break;
+					}
+					vTaskDelay(pdMS_TO_TICKS(10));
+				}
+			}
+		}
 
-	ESP_LOGI(TAG, "CO Sensor warming up for 5 minutes...");
-	vTaskDelay(pdMS_TO_TICKS(CO_SENSOR_WARMUP_TIME_MS));
-	ESP_LOGI(TAG, "CO Sensor ready");
+		// ========== ADCセンサー読み取り ==========
+		int co_adc = 0, h2s_adc = 0;
 
-	int adc_reading;
-	while (1) {
-		ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, CO_SENSOR_ADC_CHANNEL, &adc_reading));
-		ESP_LOGI(TAG, "CO Sensor: ADC raw value = %d", adc_reading);
+		if (co_ready) {
+			adc_oneshot_read(adc1_handle, CO_SENSOR_ADC_CHANNEL, &co_adc);
+		}
+		if (h2s_ready) {
+			adc_oneshot_read(adc1_handle, H2S_SENSOR_ADC_CHANNEL, &h2s_adc);
+		}
 
-		vTaskDelay(pdMS_TO_TICKS(1000));
-	}
-}
+		// ========== 統合ログ出力 ==========
+		if (bme_valid) {
+			ESP_LOGI(TAG, "BME680: Temp=%.2f°C, Hum=%.2f%%, Press=%.2fhPa, Gas=%.2fΩ",
+				bme_values.temperature, bme_values.humidity, bme_values.pressure, bme_values.gas_resistance);
+		}
+		if (co_ready) {
+			ESP_LOGI(TAG, "CO Sensor: ADC=%d", co_adc);
+		}
+		if (h2s_ready) {
+			ESP_LOGI(TAG, "H2S Sensor: ADC=%d", h2s_adc);
+		}
 
-// H2S Sensor task
-void h2s_sensor_task(void *pvParameters)
-{
-	adc_oneshot_unit_handle_t adc1_handle = (adc_oneshot_unit_handle_t)pvParameters;
-
-	adc_oneshot_chan_cfg_t config = {
-		.bitwidth = ADC_BITWIDTH_DEFAULT,
-		.atten = ADC_ATTEN_DB_12,  // 0-3.3V range
-	};
-	ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, H2S_SENSOR_ADC_CHANNEL, &config));
-
-	ESP_LOGI(TAG, "H2S Sensor warming up for 5 minutes...");
-	vTaskDelay(pdMS_TO_TICKS(H2S_SENSOR_WARMUP_TIME_MS));
-	ESP_LOGI(TAG, "H2S Sensor ready");
-
-	int adc_reading;
-	while (1) {
-		ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, H2S_SENSOR_ADC_CHANNEL, &adc_reading));
-		ESP_LOGI(TAG, "H2S Sensor: ADC raw value = %d", adc_reading);
-
+		// 1秒待機
 		vTaskDelay(pdMS_TO_TICKS(1000));
 	}
 }
@@ -190,22 +174,8 @@ void app_main(void)
 
 	ESP_LOGI(TAG, "NeoPixel initialized on GPIO %d with %d pixels", NEOPIXEL_PIN, NEOPIXEL_COUNT);
 
-	// Initialize ADC1 unit (shared by CO and H2S sensors)
-	adc_oneshot_unit_handle_t adc1_handle;
-	adc_oneshot_unit_init_cfg_t init_config = {
-		.unit_id = ADC_UNIT_1,
-	};
-	ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc1_handle));
-	ESP_LOGI(TAG, "ADC1 initialized for CO and H2S sensors");
-
-	// Create BME680 task
-	xTaskCreate(bme680_task, "bme680_task", configMINIMAL_STACK_SIZE * 8, NULL, 5, NULL);
-
-	// Create CO Sensor task
-	xTaskCreate(co_sensor_task, "co_sensor_task", configMINIMAL_STACK_SIZE * 4, (void *)adc1_handle, 5, NULL);
-
-	// Create H2S Sensor task
-	xTaskCreate(h2s_sensor_task, "h2s_sensor_task", configMINIMAL_STACK_SIZE * 4, (void *)adc1_handle, 5, NULL);
+	// Create unified sensor manager task
+	xTaskCreate(sensor_manager_task, "sensor_manager", configMINIMAL_STACK_SIZE * 8, NULL, 5, NULL);
 
 	uint8_t brightness = 0;
 	int8_t direction = 1;
