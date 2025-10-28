@@ -4,18 +4,41 @@
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "i2cdev.h"
+#include "nvs_flash.h"
 
 #include "neopixel.h"
 #include "sd_storage.h"
 #include "tasks/sensor_task.h"
+#include "wsp_protocol.h"
+#include "espnow/espnow_handler.h"
 
 #define NEOPIXEL_PIN GPIO_NUM_0
 #define NEOPIXEL_COUNT 12
 
 static const char *TAG = "main";
 
+// WSPコンテキスト（グローバル）
+static wsp_context_t g_wsp_ctx;
+
 void app_main(void)
 {
+	// Initialize NVS (必須: WiFi/ESP-NOWで使用)
+	esp_err_t ret = nvs_flash_init();
+	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+		ESP_ERROR_CHECK(nvs_flash_erase());
+		ret = nvs_flash_init();
+	}
+	ESP_ERROR_CHECK(ret);
+
+	// Initialize WSP Protocol
+	// デバイスタイプとインスタンス番号を設定
+	// TODO: NVSから読み込むか、menuconfigで設定可能にする
+	ESP_ERROR_CHECK(wsp_init(&g_wsp_ctx, WSP_DEVICE_TYPE_JACKET, 0));
+	ESP_LOGI(TAG, "WSP initialized: Device ID=0x%02X", g_wsp_ctx.device_id);
+
+	// Initialize ESP-NOW
+	ESP_ERROR_CHECK(espnow_handler_init(&g_wsp_ctx));
+
 	// Initialize I2C library
 	ESP_ERROR_CHECK(i2cdev_init());
 
