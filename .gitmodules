@@ -1,0 +1,3 @@
+[submodule "components/wsp"]
+	path = components/wsp
+	url = git@github.com:Reimanbow/wsp.git
